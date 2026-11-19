@@ -264,6 +264,112 @@ For a cleaner causal claim, run the CPU job *on the GPU pool* with
 `spark.rapids.sql.enabled=false` (submit `conf/cpu.conf` against
 `--pool $GPU_POOL`). Same machines, one flag difference.
 
+## Concurrency test (360+ queries)
+
+The Spark jobs proved *speed*. This test proves *serving scale*: the
+GPU-produced feature table is queried by hundreds of concurrent
+analysts, dashboards and apps on Starburst at once.
+
+```mermaid
+flowchart LR
+    L["Locust<br/>(1 Trino conn / user)"] -->|"hundreds of<br/>concurrent SQL"| C["Starburst coordinator"]
+    C --> W["worker(s)"]
+    W -->|"Iceberg + Parquet"| S3["ObjectScale<br/>s3://js-demo/aidp-demo/"]
+    M["monitor.py<br/>system.runtime.queries"] -.->|5s samples| C
+```
+
+All files live in `concurrency/` (self-contained; the CPU-vs-GPU flow is
+untouched):
+
+| File | Purpose |
+|---|---|
+| `prepare.py` / `prepare.sql` | Register raw `transactions`/`customers`/`merchants` as Iceberg, build `customer_features_serving` (province-partitioned copy of `mode='gpu'`), `ANALYZE`, print row+file counts |
+| `check_limits.py` | Nodes, resource-group limits, caching — run *before* any load |
+| `sample_keys.py` | 10,000 real `(province, customer_id)` pairs + domain lists so lookups hit real rows |
+| `locustfile.py` | Locust user = one Trino connection; 6-persona weighted query mix with randomized params; per-query CSV log incl. Trino query id |
+| `monitor.py` | Samples `system.runtime.queries` (RUNNING/QUEUED/FAILED) + node counts every 5 s → `results/monitor.csv` |
+| `run_ramp.sh` | Warm-up 20u/2m (discarded), steps 60→120→240→**360 (10m)**→480, 3m each |
+| `report.py` | Per-step + per-persona tables, PNG charts, rows → `aidp_demo.concurrency_results` |
+
+### Run it
+
+```bash
+pip install locust            # one-time; trino/matplotlib already needed
+./concurrency/prepare.py      # ~2-3 min: register raws + build serving table
+./concurrency/check_limits.py # READ THE OUTPUT — caps before load
+./concurrency/sample_keys.py
+./concurrency/run_ramp.sh --headless          # ~25 min, CSVs to results/
+# OR interactive:  python3 -m locust -f concurrency/locustfile.py
+#   then open http://localhost:8089 and drive users live from the dashboard
+./concurrency/report.py       # results/report.md + PNGs + Starburst rows
+```
+
+Presenting live: `locust -f concurrency/locustfile.py` (no `--headless`)
+serves a dashboard on :8089 — spawn users from the browser while
+`monitor.py` runs in a second terminal and the Starburst UI's query list
+shows the queries landing. Set `THINK_TIME=1` for a gentler "human" pace
+(default 0 = each user keeps one query in flight).
+
+### Measured (this lab cluster — 1 coordinator + 1 worker)
+
+| step | users | peak RUNNING | avg RUNNING | QUEUED | queries | errors | QPS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 60 | 60 | 64 | 60 | 0 | 2,255 | 0 | 12.5 |
+| 120 | 120 | 164 | 130 | 0 | 2,170 | 0 | 12.1 |
+| 240 | 240 | 335 | 232 | 0 | 2,849 | 338 (11.9%) | 15.8 |
+| **360** | **360** | **362** | **231** | **0** | **46,997** | **15,964 (34%)** | **78.3** |
+| 480 | 480 | 305 | 170 | 2 | 26,455 | 12,844 (48.6%) | 147.0 |
+
+**Honest read:** the coordinator *did* put 360+ queries into RUNNING
+state simultaneously (peak 362) — the cluster does not queue them via a
+resource group. The failures are **not** wrong answers and not Spark
+data problems: they're `REMOTE_TASK_ERROR — "Max requests queued per
+destination 1024 exceeded"`, i.e. the coordinator's internal HTTP
+exchange queue to the *single* worker saturates under ~230+ in-flight
+queries. Raise `exchange.http-client.max-requests-queued-per-destination`
+or add workers and the error rate drops; the workload itself is fine.
+
+| persona | weight | p50 @360 | p95 @360 |
+|---|---:|---:|---:|
+| Fraud app point lookup | 40 | ~1.1 s | 8.4 s |
+| Branch dashboard tile | 25 | ~1.0 s | 5.3 s |
+| Risk analyst top-20 | 15 | ~1.2 s | 5.3 s |
+| Exec full-table rollup | 10 | ~3.6 s | 13.4 s |
+| Merchant month join | 7 | ~35 s | 116 s |
+| Heavy quarter 3-way join | 3 | — | — |
+
+`check_limits.py` and `results/check_limits.txt` record the cluster's
+real caps (1+1 nodes, `global` resource group, ~167MB/query/node memory
+cap that fails `ANALYZE transactions` and big CTAS — `prepare.py` works
+around it with per-province INSERTs).
+
+### Why concurrency results vary
+
+* **Cluster size** — this lab has 1 worker; production DDAE clusters with
+  more workers raise the real RUNNING ceiling linearly.
+* **Resource groups** — `hardConcurrencyLimit`/`maxQueued` would put excess
+  queries in QUEUED instead of failing; check the Starburst UI → Resource
+  Groups (not readable via SQL here).
+* **Exchange transport queue** — coordinator↔worker page transport has a
+  1024-request queue per destination; single-worker clusters hit it first.
+* **Query mix** — the 40/25/15/10/7/3 weighting means ~20% of load is
+  heavy joins; a lookup-only workload sustains far more concurrency.
+* **Caching** — randomized params make consecutive queries distinct, so
+  result caching can't fake hits; Warp Speed/result cache are not enabled
+  on `js_manuf_ice` here.
+* **Data layout** — `customer_features_serving` is partitioned by
+  `province`, so 75% of the mix (province-scoped personas) prunes to a
+  single partition; the two scan-heavy personas read all 200 raw files.
+
+| Symptom | Cause / fix |
+|---|---|
+| `REMOTE_TASK_ERROR Max requests queued per destination 1024` | Exchange transport queue full — raise `exchange.http-client.max-requests-queued-per-destination` or add workers |
+| `NO_NODES_AVAILABLE` / `PAGE_TRANSPORT_ERROR` to worker:8443 | Worker process died (OOM) — scale the worker; queries land back automatically on restart |
+| `EXCEEDED_LOCAL_MEMORY_LIMIT` ~167MB on DDL/`ANALYZE` | Per-node query memory cap in the resource group — split DDL/ANALYZE per partition or raise `query.max-memory-per-node` |
+| 429/503 from the coordinator | Coordinator saturated/restarting — back off spawn rate, check `/v1/info` `starting` flag |
+| locust "Too many open files" | Client-side `ulimit -n` — raise it or run distributed (`--master`/`--worker`) |
+| All queries QUEUED, 0 RUNNING | `hardConcurrencyLimit` reached in the resource group — that's queueing, not concurrency; check the RG config |
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
