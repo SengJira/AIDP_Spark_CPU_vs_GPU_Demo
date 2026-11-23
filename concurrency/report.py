@@ -12,6 +12,7 @@ Usage: ./concurrency/report.py
 import csv
 import datetime
 import os
+import env  # noqa: F401  (loads credentials like scripts/lib.sh)
 import statistics
 import sys
 from collections import defaultdict

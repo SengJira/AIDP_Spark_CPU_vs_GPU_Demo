@@ -10,6 +10,7 @@ Honesty rule: if the resource group caps running queries < 360, we report
 the real number and where it is configured — we never call queued=running.
 """
 import os
+import env  # noqa: F401  (loads credentials like scripts/lib.sh)
 import sys
 import time
 

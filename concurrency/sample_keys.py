@@ -6,6 +6,7 @@ Writes concurrency/results/sampled_keys.csv
 """
 import csv
 import os
+import env  # noqa: F401  (loads credentials like scripts/lib.sh)
 import sys
 
 import trino.auth

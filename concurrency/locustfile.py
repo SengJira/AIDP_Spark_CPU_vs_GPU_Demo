@@ -11,6 +11,7 @@ cached result. Per-query log lines go to results/query_log.csv.
 """
 import csv
 import os
+import env  # noqa: F401  (loads credentials like scripts/lib.sh)
 import random
 import time
 

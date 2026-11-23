@@ -13,6 +13,7 @@ Env:   OBS_* / S3_* (ObjectScale), DDAE_* / TRINO_* (Starburst), DEMO_BUCKET.
 """
 import functools
 import os
+import env  # noqa: F401  (loads credentials like scripts/lib.sh)
 import sys
 
 import boto3

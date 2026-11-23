@@ -9,6 +9,7 @@ Usage: ./concurrency/monitor.py [interval_s] [duration_s]
 """
 import csv
 import os
+import env  # noqa: F401  (loads credentials like scripts/lib.sh)
 import sys
 import time
 
