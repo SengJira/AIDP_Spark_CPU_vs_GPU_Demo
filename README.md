@@ -382,6 +382,7 @@ around it with per-province INSERTs).
 | Executors stuck pending on NVIDIA-L4 | Another job/notebook holds the GPUs; `instance list` to check |
 | `add_files procedure is disabled` in Trino | Cluster config; use `register_tables.py` (pyiceberg metadata + `register_table`, needs `SET ROLE sysadmin`) |
 | `Access Denied: Cannot execute procedure register_table` | Run `SET ROLE sysadmin` first — `register_tables.py` does it automatically |
+| Data files vanished after `DROP TABLE` on a registered table | **Starburst Iceberg `DROP TABLE` deletes every file in the manifests** — never use it for tables registered over Spark-written Parquet. Use `CALL catalog.system.unregister_table(...)` (prepare.py/register_tables.py do this) and reserve `DROP TABLE` for Trino-managed tables |
 | `Unexpected physical type INT96 for timestamp` | Older Spark builds write INT96 ts — `outputTimestampType=TIMESTAMP_MICROS` is in `common.conf`; already-written files can be rewritten locally with pyarrow |
 | Iceberg writes on GPU | If you switch output to Iceberg ≥1.6 format, verify writer support in your RAPIDS version — Parquet is used here deliberately |
 

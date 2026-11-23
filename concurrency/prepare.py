@@ -153,8 +153,20 @@ def main():
         pass
 
     # ---------- 1. register raw tables ----------
-    registered = {}
+    # NEVER "DROP TABLE" a registered table here: Starburst's Iceberg DROP
+    # deletes every file in the manifests (i.e. the raw Parquet) plus the
+    # metadata dir. unregister_table only removes the catalog entry.
+    cur = trino_conn()
     skip_raw = os.environ.get("PREPARE_RAW", "1") == "0"
+    if not skip_raw:
+        for name in RAW_TABLES:
+            try:
+                run(cur, f"CALL {TRINO_CATALOG}.system.unregister_table"
+                         f"('{TRINO_SCHEMA}', '{name}')")
+            except Exception as e:
+                print(f"  unregister {name}: {str(e)[:80]} (ok if absent)")
+
+    registered = {}
     for name, spec in ({} if skip_raw else RAW_TABLES).items():
         keys = list_parquet(s3, bucket, spec["prefix"])
         if not keys:
@@ -164,6 +176,20 @@ def main():
             cat.drop_table(ident)
         except Exception:
             pass
+        # wipe stale metadata so register_table picks an unambiguous latest
+        prefix = f"{WAREHOUSE_PREFIX}/{name}/"
+        tok = None
+        while True:
+            kw = {"Bucket": bucket, "Prefix": prefix}
+            if tok:
+                kw["ContinuationToken"] = tok
+            page = s3.list_objects_v2(**kw)
+            objs = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+            if objs:
+                s3.delete_objects(Bucket=bucket, Delete={"Objects": objs})
+            if not page.get("IsTruncated"):
+                break
+            tok = page["NextContinuationToken"]
         tbl = cat.create_table(
             ident, schema=spec["schema"],
             location=f"s3://{bucket}/{WAREHOUSE_PREFIX}/{name}")
@@ -172,11 +198,9 @@ def main():
         registered[name] = tbl.location()
         print(f"{name}: {tbl.scan().to_arrow().num_rows} rows")
 
-    cur = trino_conn()
     run(cur, f"CREATE SCHEMA IF NOT EXISTS {TRINO_CATALOG}.{TRINO_SCHEMA} "
              f"WITH (location='s3://{bucket}/aidp-demo/warehouse/{TRINO_SCHEMA}')")
     for name, loc in registered.items():
-        run(cur, f"DROP TABLE IF EXISTS {TRINO_CATALOG}.{TRINO_SCHEMA}.{name}")
         run(cur, f"CALL {TRINO_CATALOG}.system.register_table('{TRINO_SCHEMA}', '{name}', '{loc}')")
 
     # ---------- 2. serving copy ----------

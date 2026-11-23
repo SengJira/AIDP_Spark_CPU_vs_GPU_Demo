@@ -150,6 +150,20 @@ def main():
             cat.drop_table(ident)
         except Exception:
             pass
+        # wipe stale metadata files so register_table picks the latest cleanly
+        prefix = f"{WAREHOUSE_PREFIX}/{name}/"
+        tok = None
+        while True:
+            kw = {"Bucket": bucket, "Prefix": prefix}
+            if tok:
+                kw["ContinuationToken"] = tok
+            page = s3.list_objects_v2(**kw)
+            objs = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+            if objs:
+                s3.delete_objects(Bucket=bucket, Delete={"Objects": objs})
+            if not page.get("IsTruncated"):
+                break
+            tok = page["NextContinuationToken"]
         tbl = cat.create_table(
             ident,
             schema=spec["schema"],
@@ -180,7 +194,13 @@ def main():
         f"CREATE SCHEMA IF NOT EXISTS js_manuf_ice.{TRINO_SCHEMA} "
         f"WITH (location='s3://{bucket}/aidp-demo/warehouse/{TRINO_SCHEMA}')")
     for name, loc in metadata.items():
-        cur.execute(f"DROP TABLE IF EXISTS js_manuf_ice.{TRINO_SCHEMA}.{name}")
+        # NOT "DROP TABLE": Iceberg DROP deletes the files in the manifests —
+        # it would wipe the Spark-written parquet under aidp-demo/.
+        try:
+            cur.execute(f"CALL js_manuf_ice.system.unregister_table"
+                        f"('{TRINO_SCHEMA}', '{name}')")
+        except Exception:
+            pass
         cur.execute(
             f"CALL js_manuf_ice.system.register_table('{TRINO_SCHEMA}', '{name}', '{loc}')")
         cur.execute(f"SELECT count(*) FROM js_manuf_ice.{TRINO_SCHEMA}.{name}")
