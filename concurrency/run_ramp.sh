@@ -41,8 +41,8 @@ MON_PID=$!
 trap 'kill $MON_PID 2>/dev/null || true' EXIT
 
 if [[ "$HEADLESS" == "0" ]]; then
-  echo "launching locust web UI on :8089" | tee -a "$LOG"
-  python3 -m locust -f "$HERE/locustfile.py" &
+  echo "launching locust web UI on ${LOCUST_WEB_HOST:-127.0.0.1}:8089" | tee -a "$LOG"
+  python3 -m locust -f "$HERE/locustfile.py" --web-host "${LOCUST_WEB_HOST:-127.0.0.1}" &
   LOCU_PID=$!
   trap 'kill $MON_PID $LOCU_PID 2>/dev/null || true' EXIT
 fi

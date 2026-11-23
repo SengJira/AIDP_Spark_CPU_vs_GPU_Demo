@@ -307,7 +307,17 @@ pip install locust            # one-time; trino/matplotlib already needed
 Presenting live: `locust -f concurrency/locustfile.py` (no `--headless`)
 serves a dashboard on :8089 — spawn users from the browser while
 `monitor.py` runs in a second terminal and the Starburst UI's query list
-shows the queries landing. Set `THINK_TIME=1` for a gentler "human" pace
+shows the queries landing.
+
+**Remote UI access:** the UI binds localhost by default. Two options —
+```bash
+# 1. SSH tunnel from your laptop (recommended — no firewall changes)
+ssh -L 8089:localhost:8089 betalab@aifactory     # then browse http://localhost:8089
+
+# 2. bind all interfaces and browse http://<host-ip>:8089 directly
+locust -f concurrency/locustfile.py --web-host 0.0.0.0
+# (LOCUST_WEB_HOST=0.0.0.0 ./concurrency/run_ramp.sh does the same)
+``` Set `THINK_TIME=1` for a gentler "human" pace
 (default 0 = each user keeps one query in flight).
 
 ### Measured (this lab cluster — 1 coordinator + 1 worker)
